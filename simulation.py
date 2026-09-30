@@ -5,10 +5,8 @@ import matplotlib.pylab as plt
 import warnings
 from qiskit import QuantumCircuit
 from qiskit.circuit.library import PauliEvolutionGate
-from qiskit.primitives import StatevectorEstimator
-from qiskit.quantum_info import Statevector,SparsePauliOp
+from qiskit.quantum_info import SparsePauliOp
 from qiskit.synthesis import (
-    SuzukiTrotter,
     LieTrotter,
 )
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
@@ -26,76 +24,75 @@ def get_hamiltonian(nqubits,J,h,alpha):
     )
     return hamiltonian.simplify()
 
-n_qubits = 6
-hamiltonian = get_hamiltonian(nqubits=n_qubits, J=0.2, h=1.2, alpha=np.pi / 8.0)
+#initialization
+n_qubit_2=2
+dt_2=1.6
+product_formula=LieTrotter(reps=1)
 
+initial_circuit_2=QuantumCircuit(n_qubit_2)
+initial_circuit_2.prepare_state("10")
 
-num_timesteps=60
-evolution_time = 30.0
-dt =evolution_time / num_timesteps
-product_formula_lt=LieTrotter()
+bar_width=0.1
+final_time=1.6
+eps = 1e-5
+alphas = np.linspace(-np.pi / 2 + eps, np.pi / 2 - eps, 5)
 
-initial_circuit =QuantumCircuit(n_qubits)
-initial_circuit.prepare_state("001100")
-#initial_circuit.decompose(reps=1).draw("mpl")
-
-single_step_evolution_gates_lt =PauliEvolutionGate(
-    hamiltonian, dt, synthesis=product_formula_lt
-)
-single_step_evolution_lt=QuantumCircuit(n_qubits)
-
-single_step_evolution_lt.append(
-    single_step_evolution_gates_lt, single_step_evolution_lt.qubits
-)
-
-magnetization = (
-    SparsePauliOp.from_sparse_list(
-        [("Z", [i], 1.0) for i in range(0, n_qubits)], num_qubits=n_qubits
-    )
-    / n_qubits
-)
-correlation = SparsePauliOp.from_sparse_list(
-    [("ZZ", [i, i + 1], 1.0) for i in range(0, n_qubits - 1)], num_qubits=n_qubits
-) / (n_qubits - 1)
-
-evolved_state=QuantumCircuit(initial_circuit.num_qubits)
-evolved_state.append(initial_circuit,evolved_state.qubits)
-estimator=StatevectorEstimator()
-
-shots = 10000
-precision=np.sqrt(1/shots)
-energy_list = []
-mag_list = []
-corr_list = []
-
-job=estimator.run(
-    [(evolved_state, [hamiltonian, magnetization, correlation])], precision=precision
+#circuit
+circuit_list=[]
+for i,alpha in enumerate(alphas):
+    evolved_state_2 =QuantumCircuit(initial_circuit_2.num_qubits)
+    evolved_state_2.append(initial_circuit_2,evolved_state_2.qubits)
+    hamiltonian_2 =get_hamiltonian(nqubits=2,J=0.2,h=1.0,alpha=alpha)
+    single_step_evolution_gates_2=PauliEvolutionGate(hamiltonian_2,dt_2,synthesis=product_formula)
+    evolved_state_2.append(single_step_evolution_gates_2,evolved_state_2.qubits)
+    evolved_state_2.measure_all()
+    circuit_list.append(evolved_state_2)
+    
+#Qiskit runtime config
+QiskitRuntimeService.save_account(
+    channel="ibm_quantum_platform",
+    token="Your API ",
+    instance="Your instance here",
+    overwrite=True,
+    set_as_default=True,
 )
 
-evs =job.result()[0].data.evs
 
-energy_list.append(evs[0])
-mag_list.append(evs[1])
-corr_list.append(evs[2])
+#connect to ibm hardware
+service=QiskitRuntimeService()
+backend = service.least_busy(operational=True,simulator=False)
+pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
 
-for n in range(num_timesteps):
-    evolved_state.append(single_step_evolution_gates_lt,evolved_state.qubits)
-
-    job=estimator.run(
-        [(evolved_state, [hamiltonian, magnetization, correlation])],
-        precision=precision,
-        )
-
-    evs=job.result()[0].data.evs
-    energy_list.append(evs[0])
-    mag_list.append(evs[1])
-    corr_list.append(evs[2])
-
-energy_array = np.array(energy_list)
-mag_array = np.array(mag_list)
-corr_array = np.array(corr_list)
+circuit_isa=pm.run(circuit_list)
+sampler = SamplerV2(mode=backend)
+job = sampler.run(circuit_isa)
 
 
+job_id = job.job_id()
+results=job.result()
+print("job id:", job_id)
 
+#post-process result
+list_temp = ["00", "01", "10", "11"]
 
+for i, alpha in enumerate(alphas):
+    # Dictionary of probabilities
+    amplitudes_dict = results[i].data.meas.get_counts()
+    values = []
+    for str_temp in list_temp:
+        values.append(
+            amplitudes_dict.get(str_temp,0) / 4096.0
+        )  # divided by default number of shots
+    # Convert angle to degrees
+    alpha_str = f"$\\alpha={int(np.round(alpha * 180 / np.pi))}^\\circ$"
+    plt.bar(np.arange(4) + i * bar_width, values, bar_width, label=alpha_str, alpha=0.7)
 
+plt.xticks(np.arange(4) + 2 * bar_width, list_temp)
+plt.xlabel("Measurement")
+plt.ylabel("Probabilities")
+plt.suptitle(
+    f"Measurement probabilities at $t={final_time}$, for various field angles $\\alpha$\n"
+    f"Initial state: 10, Linear lattice of size $L=2$"
+)
+plt.legend()
+plt.show()
